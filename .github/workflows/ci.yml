@@ -1,0 +1,29 @@
+# .github/workflows/ci.yml
+name: ci
+
+on:
+  push:
+    branches: ["main"] # runs after PRs merge to main
+  pull_request:
+    branches: ["main"] # optional: runs on PRs before merge
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    env:
+      GOTOOLCHAIN: auto
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: CI
+        run: make ci

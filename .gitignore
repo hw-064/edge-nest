@@ -8,6 +8,9 @@
 *.so
 *.dylib
 
+# Binary for this app
+/edge-nest
+
 # Test binary, built with `go test -c`
 *.test
 
