@@ -35,10 +35,12 @@ func NewEdgeNest(upstreamBase string) (*EdgeNest, error) {
 	}, nil
 }
 
+var manifestPathRegex = regexp.MustCompile(`^/v2/(.+)/manifests/([^/]+)$`)
+
 func (e *EdgeNest) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/v2/", func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case isValidManifestPath(r.URL.Path):
+		case manifestPathRegex.MatchString(r.URL.Path):
 			e.handleManifest(w, r)
 		default:
 			http.NotFound(w, r)
@@ -46,20 +48,16 @@ func (e *EdgeNest) RegisterRoutes(mux *http.ServeMux) {
 	})
 }
 
-func isValidManifestPath(path string) bool {
-	return regexp.MustCompile(`^/v2/(.+)/manifests/([^/]+)$`).MatchString(path)
-}
-
 func (e *EdgeNest) handleManifest(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
-	case http.MethodGet:
+	case http.MethodGet, http.MethodHead:
 		// Cache hit - get from our cache.
 		//TODO - implement.
 
 		// Cache miss - proxy upstream request/response.
 		e.proxy.ServeHTTP(w, r)
 	default:
-		w.Header().Set("Allow", "GET")
+		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
