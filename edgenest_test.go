@@ -27,12 +27,12 @@ func setupEdgeNestHandler(t *testing.T, upstreamHandler http.Handler) *http.Serv
 // sitting between the compute node needing the image and the
 // upstream container registry. It must adhere to the "Pull" category of the
 // OCI Distribution specification: https://github.com/opencontainers/distribution-spec/tree/main
-//
+
 // Behaviour:
 //   - Given a GET /v2/<name>/manifests/<reference> request, EdgeNest
 //     must proxy it to the upstream registry /v2/... and return the same body
 //     and key headers (Content-Type and Docker-Content-Digest) to the client.
-func TestOCIPullOnlyMirror_Contract(t *testing.T) {
+func TestManifestGET(t *testing.T) {
 	t.Run("Manifest GET request proxies the upstream when fetching manifest from registry", func(t *testing.T) {
 		// Arrange
 		const manifestBody = `{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.v2+json"}`
@@ -99,6 +99,11 @@ func TestOCIPullOnlyMirror_Contract(t *testing.T) {
 	})
 }
 
+// Behaviour:
+//   - Given a HEAD /v2/<name>/manifests/<reference> request, EdgeNest
+//     must proxy it to the upstream registry /v2/... and return the same response with
+//     key headers (Content-Type and Docker-Content-Digest) to the client.
+//     No body should be returned.
 func TestManifestHEAD(t *testing.T) {
 	t.Run("HEAD request returns headers without body", func(t *testing.T) {
 		// Arrange
@@ -148,6 +153,8 @@ func TestManifestHEAD(t *testing.T) {
 	})
 }
 
+// Behaviour:
+//   - Manifest paths in GET or HEAD requests must be in valid format "/v2/<name>/manifests/<reference>", otherwise return 404.
 func TestManifestPathValidation(t *testing.T) {
 	// HEAD goes through same path so we just test with GET here to be pragmatic.
 	// If we want to be comprehensive we could table in the HEAD method.
@@ -192,6 +199,48 @@ func TestManifestPathValidation(t *testing.T) {
 
 				if rec.Code != http.StatusNotFound {
 					t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
+				}
+			})
+		}
+	})
+}
+
+// Behaviour:
+//   - When invalid HTTP method requests are sent (non GET/HEAD), EdgeNest
+//   - should return 405 status code and Include an Allow header listing the allowed methods
+//   - in the response. EdgeNest should also never attempt to call upstream
+//   - registry in the event of an invalid HTTP method request (for efficiency reasons).
+func TestManifestMethodNotAllowed(t *testing.T) {
+	t.Run("unsupported HTTP methods return 405", func(t *testing.T) {
+		methods := []string{
+			http.MethodPost,
+			http.MethodPut,
+			http.MethodDelete,
+			http.MethodPatch,
+			http.MethodOptions,
+		}
+
+		upstreamHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Fatal("upstream should not be called for unsupported methods")
+		})
+
+		mux := setupEdgeNestHandler(t, upstreamHandler)
+
+		const manifestPath = "/v2/library/alpine/manifests/latest"
+
+		for _, method := range methods {
+			t.Run(method, func(t *testing.T) {
+				rec := httptest.NewRecorder()
+				req := httptest.NewRequest(method, manifestPath, nil)
+				mux.ServeHTTP(rec, req)
+
+				if rec.Code != http.StatusMethodNotAllowed {
+					t.Errorf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+				}
+
+				allowHeader := rec.Header().Get("Allow")
+				if allowHeader != "GET, HEAD" {
+					t.Errorf("Allow header = %q, want %q", allowHeader, "GET, HEAD")
 				}
 			})
 		}
