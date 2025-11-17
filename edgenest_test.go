@@ -246,3 +246,61 @@ func TestManifestMethodNotAllowed(t *testing.T) {
 		}
 	})
 }
+
+// Behaviour:
+//   - Context: EdgeNest proxies client's request to upstream registry.
+//   - When a 404, 500, or 503 error response is returned from upstream registry,
+//   - EdgeNest should simply proxy the response back to the client.
+func TestManifestUpstreamErrorHandling(t *testing.T) {
+	t.Run("proxies upstream error responses", func(t *testing.T) {
+		cases := []struct {
+			name       string
+			statusCode int
+			body       string
+		}{
+			{
+				name:       "404 not found",
+				statusCode: http.StatusNotFound,
+				body:       `{"errors":[{"code":"MANIFEST_UNKNOWN","message":"manifest unknown"}]}`,
+			},
+			{
+				name:       "500 internal server error",
+				statusCode: http.StatusInternalServerError,
+				body:       `{"errors":[{"code":"UNKNOWN","message":"internal error"}]}`,
+			},
+			{
+				name:       "503 service unavailable",
+				statusCode: http.StatusServiceUnavailable,
+				body:       "service temporarily unavailable",
+			},
+		}
+
+		const manifestPath = "/v2/library/alpine/manifests/latest"
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				upstreamHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(tc.statusCode)
+					w.Write([]byte(tc.body))
+				})
+
+				mux := setupEdgeNestHandler(t, upstreamHandler)
+
+				// We'll just test with GET to be pragmatic.
+				rec := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodGet, manifestPath, nil)
+				mux.ServeHTTP(rec, req)
+
+				if rec.Code != tc.statusCode {
+					t.Errorf("status = %d, want %d", rec.Code, tc.statusCode)
+				}
+
+				gotBody := strings.TrimSpace(rec.Body.String())
+				wantBody := strings.TrimSpace(tc.body)
+				if gotBody != wantBody {
+					t.Errorf("body = %q, want %q", gotBody, wantBody)
+				}
+			})
+		}
+	})
+}
