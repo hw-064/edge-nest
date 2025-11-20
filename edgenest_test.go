@@ -23,6 +23,34 @@ func setupEdgeNestHandler(t *testing.T, upstreamHandler http.Handler) *http.Serv
 	return mux
 }
 
+func assertManifestResponsesMatch(t *testing.T, got, want *http.Response) {
+	t.Helper()
+
+	if got.Header.Get("Content-Type") != want.Header.Get("Content-Type") {
+		t.Errorf("Content-Type = %q, want %q",
+			got.Header.Get("Content-Type"), want.Header.Get("Content-Type"))
+	}
+
+	if got.Header.Get("Docker-Content-Digest") != want.Header.Get("Docker-Content-Digest") {
+		t.Errorf("Docker-Content-Digest = %q, want %q",
+			got.Header.Get("Docker-Content-Digest"), want.Header.Get("Docker-Content-Digest"))
+	}
+
+	wantBody, err := io.ReadAll(want.Body)
+	if err != nil {
+		t.Fatalf("failed to read want body: %v", err)
+	}
+
+	gotBody, err := io.ReadAll(got.Body)
+	if err != nil {
+		t.Fatalf("failed to read got body: %v", err)
+	}
+
+	if strings.TrimSpace(string(gotBody)) != strings.TrimSpace(string(wantBody)) {
+		t.Fatalf("unexpected body: got %q, want %q", string(gotBody), string(wantBody))
+	}
+}
+
 // EdgeNest acts as a pull-only mirror for OCI container images,
 // sitting between the compute node needing the image and the
 // upstream container registry. It must adhere to the "Pull" category of the
@@ -70,26 +98,7 @@ func TestManifestGET(t *testing.T) {
 		want := upstreamRecorder.Result()
 		defer want.Body.Close()
 
-		if gotCT := got.Header.Get("Content-Type"); gotCT != want.Header.Get("Content-Type") {
-			t.Fatalf("unexpected Content-Type: got %q, want %q", gotCT, want.Header.Get("Content-Type"))
-		}
-
-		if gotDigest := got.Header.Get("Docker-Content-Digest"); gotDigest != want.Header.Get("Docker-Content-Digest") {
-			t.Fatalf("unexpected Docker-Content-Digest: got %q, want %q", gotDigest, want.Header.Get("Docker-Content-Digest"))
-		}
-
-		wantBody, err := io.ReadAll(want.Body)
-		if err != nil {
-			t.Fatalf("reading wanted body: %v", err)
-		}
-		gotBody, err := io.ReadAll(got.Body)
-		if err != nil {
-			t.Fatalf("reading got body: %v", err)
-		}
-
-		if strings.TrimSpace(string(gotBody)) != strings.TrimSpace(string(wantBody)) {
-			t.Fatalf("unexpected body: got %q, want %q", string(gotBody), string(wantBody))
-		}
+		assertManifestResponsesMatch(t, got, want)
 	})
 
 	t.Run("Manifest GET request always contains header Docker-Content-Digest (cache hit)", func(t *testing.T) {
@@ -302,5 +311,70 @@ func TestManifestUpstreamErrorHandling(t *testing.T) {
 				}
 			})
 		}
+	})
+}
+
+// Behaviour:
+//   - When EdgeNest receives successive GET/HEAD requests for the same manifest
+//     that have been received before, EdgeNest should return cached responses
+//     including manifest body back to the client. For cache hits, EdgeNest should
+//     not attempt to contact the upstream registry.
+func TestManifestCaching(t *testing.T) {
+	t.Run("first request fetches from upstream, second serves from cache", func(t *testing.T) {
+		// Arrange
+		const manifestBody = `{"schemaVersion":2}`
+		const manifestDigest = "sha256:c0ffee"
+		const manifestPath = "/v2/library/alpine/manifests/latest"
+
+		upstreamCallCount := 0
+		upstreamHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			upstreamCallCount++
+			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			w.Header().Set("Docker-Content-Digest", manifestDigest)
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(manifestBody))
+		})
+
+		cache := NewCache()
+		mux := setupEdgeNestHandler(t, upstreamHandler, cache)
+
+		// Our first request to get the manifest is a cache miss, so the upstream
+		// should be called to proxy the response back.
+		upstreamRec := httptest.NewRecorder()
+		upstreamReq := httptest.NewRequest(http.MethodGet, manifestPath, nil)
+		upstreamHandler.ServeHTTP(upstreamRec, upstreamReq)
+
+		want := upstreamRec.Result()
+		defer want.Body.Close()
+
+		rec1 := httptest.NewRecorder()
+		req1 := httptest.NewRequest(http.MethodGet, manifestPath, nil)
+		mux.ServeHTTP(rec1, req1)
+		got1 := rec1.Result()
+		defer got1.Body.Close()
+
+		assertManifestResponsesMatch(t, got1, want)
+		// We check that count is zero and later that count doesn't change,
+		// so that we can accomodate any retry logic with upstream without
+		// breaking this test.
+		if upstreamCallCount == 0 {
+			t.Errorf("After first request, upstream should have been called but it wasn't.", upstreamCallCount)
+		}
+		upstreamCallCountAfterFirstRequest := upstreamCallCount
+
+		// We'll request to get the same manifest, expecting a cache hit. Upstream
+		// shouldn't be called.
+		rec2 := httptest.NewRecorder()
+		req2 := httptest.NewRequest(http.MethodGet, manifestPath, nil)
+		mux.ServeHTTP(rec2, req2)
+
+		got2 := rec2.Result()
+		defer got2.Body.Close()
+
+		if upstreamCallCount > upstreamCallCountAfterFirstRequest {
+			t.Errorf("after second request, upstream shouldn't be called. Upstream was called %d times, want $", upstreamCallCount, upstreamCallCountAfterFirstRequest)
+		}
+		assertManifestResponsesMatch(t, got2, want)
+
 	})
 }
